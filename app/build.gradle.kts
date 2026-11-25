@@ -41,6 +41,10 @@ android {
             excludes += setOf(
                 "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
                 "META-INF/{AL2.0,LGPL2.1}",
+                "META-INF/LICENSE*",
+                "META-INF/NOTICE*",
+                "META-INF/DEPENDENCIES",
+                "META-INF/INDEX.LIST",
             )
         }
     }
@@ -55,4 +59,5 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
+    implementation("dev.mobile:dadb:1.2.10")
 }

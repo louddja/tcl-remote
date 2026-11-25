@@ -1,0 +1,7 @@
+<resources>
+    <color name="bg">#FF0E0E10</color>
+    <color name="icon_bg">#FF1A1A1D</color>
+    <style name="Theme.TelecommandeTCL" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+    </style>
+</resources>

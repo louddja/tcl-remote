@@ -9,7 +9,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -41,6 +43,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 // ---------- Couleurs ----------
@@ -52,6 +55,9 @@ private val Muted = Color(0xFF8E8E96)    // texte secondaire
 private val Accent = Color(0xFF4F8CFF)   // bleu
 private val PowerRed = Color(0xFFE5484D) // touche marche/arrêt
 private val Online = Color(0xFF3DD68C)   // voyant connecté
+private val Waiting = Color(0xFFF5A524)  // voyant reconnexion
+
+enum class SourcesState { OFF, CONNECTING, READY, ERROR }
 
 private const val SEARCHING = "Recherche des TV sur le Wi‑Fi…"
 
@@ -97,6 +103,12 @@ fun App() {
     var showCode by remember { mutableStateOf(false) }
     var code by remember { mutableStateOf("") }
     var autoTried by remember { mutableStateOf(false) }
+    var reconnecting by remember { mutableStateOf(false) }
+    var retries by remember { mutableStateOf(0) }
+    var adb by remember { mutableStateOf<AdbHelper?>(null) }
+    var sourcesState by remember { mutableStateOf(SourcesState.OFF) }
+    var sourcesError by remember { mutableStateOf("") }
+    var inputs by remember { mutableStateOf(listOf<TvInput>()) }
 
     // Détection automatique des TV dès l'ouverture
     DisposableEffect(Unit) {
@@ -106,10 +118,60 @@ fun App() {
             discovery.stop()
             remote?.close()
             pairing?.cancel()
+            adb?.close()
         }
     }
 
     fun pairedNames(): Set<String> = prefs.getStringSet("paired", emptySet()) ?: emptySet()
+
+    fun savedInputs(tv: TvDevice): List<TvInput> =
+        (prefs.getString("inputs_${tv.name}", null) ?: "").lines().mapNotNull { line ->
+            line.split("|").takeIf { it.size == 2 }?.let { TvInput(it[0], it[1]) }
+        }
+
+    // Si les sources ont déjà été activées pour cette TV, on les reprend sans redemander
+    fun restoreSources(tv: TvDevice) {
+        if (adb == null && prefs.getBoolean("adb_${tv.name}", false)) {
+            adb = AdbHelper(context, tv.host)
+            inputs = savedInputs(tv)
+            sourcesState = SourcesState.READY
+        }
+    }
+
+    fun enableSources(tv: TvDevice) {
+        adb?.close()
+        val helper = AdbHelper(context, tv.host)
+        adb = helper
+        sourcesState = SourcesState.CONNECTING
+        scope.launch(Dispatchers.IO) {
+            try {
+                val found = helper.loadInputs()
+                inputs = found
+                prefs.edit()
+                    .putBoolean("adb_${tv.name}", true)
+                    .putString("inputs_${tv.name}", found.joinToString("\n") { "${it.label}|${it.id}" })
+                    .apply()
+                sourcesState = SourcesState.READY
+            } catch (e: Exception) {
+                helper.close()
+                sourcesError = "Échec : ${e.message ?: "erreur"}. Vérifiez « Débogage USB » sur la TV."
+                sourcesState = SourcesState.ERROR
+            }
+        }
+    }
+
+    fun runSource(block: (AdbHelper) -> Unit) {
+        val helper = adb ?: return
+        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        scope.launch(Dispatchers.IO) {
+            try {
+                block(helper)
+            } catch (e: Exception) {
+                sourcesError = "Sources indisponibles : ${e.message ?: "erreur"}"
+                sourcesState = SourcesState.ERROR
+            }
+        }
+    }
 
     fun connect(tv: TvDevice) {
         remote?.close()
@@ -118,10 +180,33 @@ fun App() {
         var self: AtvRemote? = null
         val created = AtvRemote(context, tv.host, scope) { ok, msg ->
             if (remote === self) { // ignore les messages d'une ancienne connexion
-                connected = ok
-                failed = !ok
-                status = if (ok) "Connecté" else msg
-                if (ok) prefs.edit().putString("last", tv.name).apply()
+                when {
+                    ok -> {
+                        connected = true
+                        reconnecting = false
+                        retries = 0
+                        status = "Connecté"
+                        prefs.edit().putString("last", tv.name).apply()
+                        restoreSources(tv)
+                    }
+                    // Connexion perdue : on réessaie tout seul, sans quitter la télécommande
+                    (connected || reconnecting) && retries < 5 -> {
+                        connected = false
+                        reconnecting = true
+                        retries++
+                        status = "Reconnexion…"
+                        scope.launch {
+                            delay(3000)
+                            if (remote === self) connect(tv)
+                        }
+                    }
+                    else -> {
+                        connected = false
+                        reconnecting = false
+                        failed = true
+                        status = msg
+                    }
+                }
             }
         }
         self = created
@@ -183,7 +268,13 @@ fun App() {
         val r = remote
         remote = null
         r?.close()
+        adb?.close()
+        adb = null
+        inputs = emptyList()
+        sourcesState = SourcesState.OFF
         connected = false
+        reconnecting = false
+        retries = 0
         failed = false
         current = null
         status = SEARCHING
@@ -218,8 +309,20 @@ fun App() {
 
     Box(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
         val tv = current
-        if (connected && tv != null) {
-            RemoteScreen(tv.name, onChange = { disconnect() }, press = press, launchApp = launchApp)
+        if ((connected || reconnecting) && tv != null) {
+            RemoteScreen(
+                tvName = tv.name,
+                reconnecting = reconnecting,
+                onChange = { disconnect() },
+                press = press,
+                launchApp = launchApp,
+                sourcesState = sourcesState,
+                sourcesError = sourcesError,
+                inputs = inputs,
+                onEnableSources = { enableSources(tv) },
+                onSourceMenu = { runSource { it.openSourceMenu() } },
+                onInput = { id -> runSource { it.openInput(id) } },
+            )
         } else {
             TvListScreen(
                 tvs = tvs,
@@ -392,16 +495,31 @@ fun CodeDialog(
 //  Écran 2 : la télécommande
 // =====================================================================
 @Composable
-fun RemoteScreen(tvName: String, onChange: () -> Unit, press: (Int) -> Unit, launchApp: (String) -> Unit) {
+fun RemoteScreen(
+    tvName: String,
+    reconnecting: Boolean,
+    onChange: () -> Unit,
+    press: (Int) -> Unit,
+    launchApp: (String) -> Unit,
+    sourcesState: SourcesState,
+    sourcesError: String,
+    inputs: List<TvInput>,
+    onEnableSources: () -> Unit,
+    onSourceMenu: () -> Unit,
+    onInput: (String) -> Unit,
+) {
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         // En-tête : TV connectée
         Row(Modifier.widthIn(max = 380.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(10.dp).clip(CircleShape).background(Online))
+            Box(Modifier.size(10.dp).clip(CircleShape).background(if (reconnecting) Waiting else Online))
             Spacer(Modifier.width(8.dp))
-            Text(tvName, Modifier.weight(1f), fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Column(Modifier.weight(1f)) {
+                Text(tvName, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (reconnecting) Text("Reconnexion…", color = Waiting, fontSize = 12.sp)
+            }
             TextButton(onClick = onChange) {
                 Icon(Icons.Filled.SwapHoriz, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
@@ -424,7 +542,6 @@ fun RemoteScreen(tvName: String, onChange: () -> Unit, press: (Int) -> Unit, lau
             ) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     RoundKey(Icons.Filled.PowerSettingsNew, "Marche/Arrêt", color = PowerRed) { press(KeyEvent.KEYCODE_POWER) }
-                    RoundKey(Icons.Filled.Input, "Source") { press(KeyEvent.KEYCODE_TV_INPUT) }
                     RoundKey(Icons.Filled.Settings, "Réglages") { press(KeyEvent.KEYCODE_SETTINGS) }
                 }
                 Spacer(Modifier.height(26.dp))
@@ -435,49 +552,33 @@ fun RemoteScreen(tvName: String, onChange: () -> Unit, press: (Int) -> Unit, lau
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     RoundKey(Icons.Filled.ArrowBack, "Retour") { press(KeyEvent.KEYCODE_BACK) }
                     RoundKey(Icons.Filled.Home, "Accueil") { press(KeyEvent.KEYCODE_HOME) }
-                    RoundKey(Icons.Filled.LiveTv, "TV") { press(KeyEvent.KEYCODE_TV) }
+                    RoundKey(Icons.Filled.PlayArrow, "Lecture/Pause") { press(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) }
                 }
                 Spacer(Modifier.height(20.dp))
 
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Bottom,
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Rocker("VOL", Icons.Filled.Add, Icons.Filled.Remove,
                         { press(KeyEvent.KEYCODE_VOLUME_UP) }, { press(KeyEvent.KEYCODE_VOLUME_DOWN) })
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        RoundKey(Icons.Filled.Menu, "Menu") { press(KeyEvent.KEYCODE_MENU) }
-                        Spacer(Modifier.height(20.dp))
-                        RoundKey(Icons.Filled.VolumeOff, "Muet") { press(KeyEvent.KEYCODE_VOLUME_MUTE) }
-                    }
+                    RoundKey(Icons.Filled.VolumeOff, "Muet") { press(KeyEvent.KEYCODE_VOLUME_MUTE) }
                     Rocker("CH", Icons.Filled.KeyboardArrowUp, Icons.Filled.KeyboardArrowDown,
                         { press(KeyEvent.KEYCODE_CHANNEL_UP) }, { press(KeyEvent.KEYCODE_CHANNEL_DOWN) })
                 }
-                Spacer(Modifier.height(20.dp))
-
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    RoundKey(Icons.Filled.Info, "Info") { press(KeyEvent.KEYCODE_INFO) }
-                    RoundKey(Icons.Filled.GridView, "Guide") { press(KeyEvent.KEYCODE_GUIDE) }
-                    RoundKey(Icons.Filled.PlayArrow, "Lecture/Pause") { press(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) }
-                }
                 Spacer(Modifier.height(24.dp))
 
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SmallPill("HDMI 1", Modifier.weight(1f)) { press(KeyEvent.KEYCODE_TV_INPUT_HDMI_1) }
-                    SmallPill("HDMI 2", Modifier.weight(1f)) { press(KeyEvent.KEYCODE_TV_INPUT_HDMI_2) }
-                    SmallPill("HDMI 3", Modifier.weight(1f)) { press(KeyEvent.KEYCODE_TV_INPUT_HDMI_3) }
-                }
-                Spacer(Modifier.height(22.dp))
+                SourcesSection(sourcesState, sourcesError, inputs, onEnableSources, onSourceMenu, onInput)
+                Spacer(Modifier.height(24.dp))
 
-                AppRow("Netflix", "https://www.netflix.com/title",
-                    "Prime Video", "https://app.primevideo.com", launchApp)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    AppPill("Netflix", Modifier.weight(1f)) { launchApp("market://launch?id=com.netflix.ninja") }
+                    AppPill("YouTube", Modifier.weight(1f)) { launchApp("https://www.youtube.com") }
+                }
                 Spacer(Modifier.height(10.dp))
-                AppRow("YouTube", "https://www.youtube.com",
-                    "Disney+", "https://www.disneyplus.com", launchApp)
-                Spacer(Modifier.height(10.dp))
-                AppRow("Apple TV", "market://launch?id=com.apple.atve.androidtv.appletv",
-                    "Spotify", "market://launch?id=com.spotify.tv.android", launchApp)
+                // Sur cette TV, ce lien ouvre King IPTV Pro
+                AppPill("King IPTV Pro", Modifier.fillMaxWidth()) { launchApp("https://www.disneyplus.com") }
             }
         }
         Spacer(Modifier.height(16.dp))
@@ -557,15 +658,70 @@ fun AppRow(label1: String, link1: String, label2: String, link2: String, launchA
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun AppPill(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(24.dp),
-        color = Color(0xFFF2F2F4),
-        contentColor = Color(0xFF1A1A1D),
-        modifier = modifier.height(48.dp),
+fun AppPill(label: String, modifier: Modifier = Modifier, onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
+    Box(
+        modifier
+            .height(48.dp)
+            .clip(RoundedCornerShape(24.dp))
+            .background(Color(0xFFF2F2F4))
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        contentAlignment = Alignment.Center,
     ) {
-        Box(contentAlignment = Alignment.Center) { Text(label, fontWeight = FontWeight.SemiBold, fontSize = 15.sp) }
+        Text(label, color = Color(0xFF1A1A1D), fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1)
+    }
+}
+
+@Composable
+fun SourcesSection(
+    state: SourcesState,
+    error: String,
+    inputs: List<TvInput>,
+    onEnable: () -> Unit,
+    onMenu: () -> Unit,
+    onInput: (String) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text("SOURCES", color = Muted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp)
+        Spacer(Modifier.height(8.dp))
+        when (state) {
+            SourcesState.READY -> {
+                val items = listOf(TvInput("Source", "")) + inputs
+                items.chunked(3).forEach { row ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        row.forEach { item ->
+                            SmallPill(item.label, Modifier.weight(1f)) {
+                                if (item.id.isEmpty()) onMenu() else onInput(item.id)
+                            }
+                        }
+                        repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                    }
+                }
+            }
+            SourcesState.CONNECTING -> {
+                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Waiting)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Sur la TV, acceptez « Autoriser le débogage » (cochez « Toujours autoriser »).",
+                    color = Waiting, fontSize = 13.sp, textAlign = TextAlign.Center,
+                )
+            }
+            else -> {
+                if (state == SourcesState.ERROR) {
+                    Text(error, color = PowerRed, fontSize = 12.sp, textAlign = TextAlign.Center)
+                    Spacer(Modifier.height(8.dp))
+                }
+                SmallPill("Activer les sources", Modifier.fillMaxWidth()) { onEnable() }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Nécessite « Débogage USB » activé sur la TV (Options pour les développeurs).",
+                    color = Muted, fontSize = 11.sp, textAlign = TextAlign.Center,
+                )
+            }
+        }
     }
 }

@@ -51,18 +51,31 @@ Ensuite, l'application se reconnecte toute seule à votre TV à chaque ouverture
 | Bouton | Rôle |
 |---|---|
 | ⏻ (rouge) | Éteindre / mettre en veille |
-| Source | Choisir l'entrée (HDMI, TV…) |
-| HDMI 1 / 2 / 3 | Aller directement sur une entrée HDMI |
+| ⚙ Réglages | Ouvrir les paramètres de la TV |
 | Croix + OK | Se déplacer dans les menus et valider |
 | Retour / Accueil | Revenir en arrière / écran d'accueil |
-| TV | Revenir aux chaînes TV |
+| Lecture/Pause | Mettre en pause ou relancer une vidéo |
 | VOL + / − et Muet | Régler le son |
 | CH + / − | Changer de chaîne |
-| Menu, Info, Guide | Options, informations, guide des programmes |
-| Lecture/Pause | Mettre en pause ou relancer une vidéo |
-| Netflix, YouTube, Prime Video… | Ouvrir directement l'application sur la TV |
+| Netflix, YouTube, King IPTV Pro | Ouvrir directement l'application sur la TV |
 
 Le bouton **Changer** en haut de l'écran permet de choisir une autre TV.
+
+### Les sources (HDMI, TV)
+
+Certaines TV, dont les TCL sous Android TV, refusent de changer de source par la télécommande Wi‑Fi.
+L'application passe alors par une autre voie : le **débogage ADB** de la TV. Il faut l'activer une fois :
+
+1. Sur la TV : *Paramètres → Préférences relatives à l'appareil → À propos*, puis appuyez **7 fois** sur *Build*.
+2. Revenez en arrière, ouvrez **Options pour les développeurs** et activez **Débogage USB**.
+3. Dans l'application, touchez **Activer les sources**.
+4. Sur la TV, acceptez « Autoriser le débogage » en cochant **Toujours autoriser**.
+
+L'application détecte alors les entrées de votre TV et affiche les boutons **Source** (menu des sources),
+**HDMI 1**, **HDMI 2**… et **TV** (antenne).
+
+> Le débogage ADB donne un accès avancé à la TV aux appareils que vous avez autorisés.
+> N'acceptez la demande que pour votre propre téléphone, et désactivez-le si vous n'utilisez plus les sources.
 
 ---
 
@@ -79,8 +92,12 @@ Le bouton **Changer** en haut de l'écran permet de choisir une autre TV.
 - Relancez l'appairage en touchant à nouveau votre TV : un nouveau code s'affiche.
 
 **La connexion se coupe ou ne marche plus**
-- Touchez **Réessayer**.
+- L'application se reconnecte toute seule (voyant orange « Reconnexion… »).
+- Si elle n'y arrive pas, touchez **Réessayer**.
 - Si ça ne suffit pas, touchez **Réappairer** et entrez le nouveau code.
+
+**Les boutons de source ne répondent plus**
+- Vérifiez que **Débogage USB** est toujours activé sur la TV, puis touchez **Activer les sources**.
 
 **La TV ne se rallume pas depuis l'application**
 Quand la TV est complètement éteinte, elle ne répond plus sur le réseau.
@@ -122,5 +139,5 @@ Application Kotlin / Jetpack Compose. Elle utilise le protocole **Android TV Rem
 ## 📄 Licence et marques
 
 Projet personnel fourni tel quel, sans garantie.
-TCL, Google TV, Android TV, Netflix, YouTube, Prime Video, Disney+, Apple TV et Spotify
+TCL, Google TV, Android TV, Netflix, YouTube et King IPTV Pro
 sont des marques de leurs propriétaires respectifs.
